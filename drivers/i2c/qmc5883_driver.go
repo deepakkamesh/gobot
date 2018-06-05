@@ -11,6 +11,7 @@ const (
 	qmc5883Address = 0x0d
 
 	// Register addresses.
+	qmc5883StatusReg = 0x06
 	qmc5883ConfigReg = 0x09
 	qmc5883LSBx      = 0x00
 	qmc5883MSBx      = 0x01
@@ -52,6 +53,7 @@ type QMC5883Driver struct {
 	Config
 	xOff      int16 // x Offset.
 	yOff      int16 // y Offset.
+	zOff      int16 // z Offset.
 	magConfig byte  // Config byte.
 }
 
@@ -69,6 +71,9 @@ func NewQMC5883Driver(a Connector, options ...func(Config)) *QMC5883Driver {
 		connector: a,
 		Config:    NewConfig(),
 		magConfig: QMC5883DefaultConfig,
+		xOff:      0,
+		yOff:      0,
+		zOff:      0,
 	}
 
 	for _, option := range options {
@@ -102,7 +107,7 @@ func (h *QMC5883Driver) Start() (err error) {
 		return err
 	}
 	// Setup Config register.
-	if err := h.connection.WriteByteData(qmc5883ConfigReg, QMC5883DefaultConfig); err != nil {
+	if err := h.connection.WriteByteData(qmc5883ConfigReg, h.magConfig); err != nil {
 		return err
 	}
 
@@ -119,7 +124,7 @@ func (h *QMC5883Driver) CalibrateCompass(ch chan struct{}) (offsetX, offsetY int
 	var minX, maxX, minY, maxY int16
 
 	getReading := func() (err error) {
-		x, y, _, err := h.readRaw()
+		x, y, _, err := h.RawHeading()
 		if err != nil {
 			return
 		}
@@ -145,33 +150,61 @@ func (h *QMC5883Driver) CalibrateCompass(ch chan struct{}) (offsetX, offsetY int
 		case <-ch:
 			offsetX = (minX + maxX) / 2
 			offsetY = (minY + maxY) / 2
+			//	offsetX = totX / cnt
+			//	offsetY = totY / cnt
 			return
 
 		default:
 			if err := getReading(); err != nil {
 				return
 			}
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
 
 // SetOffsets sets the offsets.
-func (h *QMC5883Driver) SetOffset(xOff, yOff int16) {
+func (h *QMC5883Driver) SetOffset(xOff, yOff, zOff int16) {
 	h.xOff = xOff
 	h.yOff = yOff
+	h.zOff = zOff
+
 }
 
 // Halt returns true if devices is halted successfully
 func (h *QMC5883Driver) Halt() (err error) { return }
 
+func (h *QMC5883Driver) GetStatusReg() (byte, error) {
+	var err error
+	if _, err = h.connection.Write([]byte{qmc5883StatusReg}); err != nil {
+		return 0, err
+	}
+
+	data := make([]byte, 1)
+	bytesRead, err := h.connection.Read(data)
+	if err != nil {
+		return 0, err
+	}
+	if bytesRead < 1 {
+		err = ErrNotEnoughBytes
+		return 0, err
+	}
+
+	return data[0], nil
+}
+
 // Heading returns the current heading
 func (h *QMC5883Driver) Heading() (headingDeg float64, err error) {
-
-	x, y, _, err := h.readRaw()
+	x, y, z, err := h.RawHeading()
 	if err != nil {
 		return
 	}
+
+	return h.HeadingFromRaw(x, y, z), nil
+}
+
+// Heading returns the current heading
+func (h *QMC5883Driver) HeadingFromRaw(x, y, z int16) (headingDeg float64) {
 
 	scale := qmc5883SScale2G
 	if (h.magConfig & 0xF0) == QMC5883RNG8G {
@@ -194,7 +227,18 @@ func (h *QMC5883Driver) Heading() (headingDeg float64, err error) {
 }
 
 // read returns raw compass values.
-func (h *QMC5883Driver) readRaw() (x, y, z int16, err error) {
+func (h *QMC5883Driver) RawHeading() (x, y, z int16, err error) {
+	var st byte
+	for {
+		st, err = h.GetStatusReg()
+		if err != nil {
+			return
+		}
+		if st&0x01 == 1 {
+			break
+		}
+	}
+
 	if _, err = h.connection.Write([]byte{qmc5883LSBx}); err != nil {
 		return
 	}
@@ -213,8 +257,9 @@ func (h *QMC5883Driver) readRaw() (x, y, z int16, err error) {
 	y = int16(data[3])<<8 | int16(data[2])
 	z = int16(data[5])<<8 | int16(data[4])
 
-	x = x - h.xOff
-	y = y - h.yOff
+	x -= h.xOff
+	y -= h.yOff
+	z -= h.zOff
 
 	return
 }

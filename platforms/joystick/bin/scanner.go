@@ -1,3 +1,7 @@
+// +build utils
+//
+// Do not build by default.
+//
 // Joystick scanner
 // Based on original code from Jacky Boen
 // https://github.com/veandco/go-sdl2/blob/master/examples/events/events.go
@@ -40,18 +44,16 @@ func run() int {
 			case *sdl.JoyHatEvent:
 				fmt.Printf("[%d ms] Hat:%d\tvalue:%d\n",
 					t.Timestamp, t.Hat, t.Value)
-			case *sdl.JoyDeviceEvent:
-				if t.Type == sdl.JOYDEVICEADDED {
-					joysticks[int(t.Which)] = sdl.JoystickOpen(t.Which)
-					if joysticks[int(t.Which)] != nil {
-						fmt.Printf("Joystick %d connected\n", t.Which)
-					}
-				} else if t.Type == sdl.JOYDEVICEREMOVED {
-					if joystick := joysticks[int(t.Which)]; joystick != nil {
-						joystick.Close()
-					}
-					fmt.Printf("Joystick %d disconnected\n", t.Which)
+			case *sdl.JoyDeviceAddedEvent:
+				joysticks[int(t.Which)] = sdl.JoystickOpen(int(t.Which))
+				if joysticks[int(t.Which)] != nil {
+					fmt.Printf("Joystick %d connected\n", t.Which)
 				}
+			case *sdl.JoyDeviceRemovedEvent:
+				if joystick := joysticks[int(t.Which)]; joystick != nil {
+					joystick.Close()
+				}
+				fmt.Printf("Joystick %d disconnected\n", t.Which)
 			default:
 				fmt.Printf("Unknown event\n")
 			}

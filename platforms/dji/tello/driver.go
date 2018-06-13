@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 )
 
 const (
+	// BounceEvent event
+	BounceEvent = "bounce"
+
 	// ConnectedEvent event
 	ConnectedEvent = "connected"
 
@@ -24,6 +28,9 @@ const (
 
 	// LandingEvent event
 	LandingEvent = "landing"
+
+	// PalmLandingEvent event
+	PalmLandingEvent = "palm-landing"
 
 	// FlipEvent event
 	FlipEvent = "flip"
@@ -50,23 +57,26 @@ const (
 	SetVideoEncoderRateEvent = "setvideoencoder"
 )
 
+// the 16-bit messages and commands stored in bytes 6 & 5 of the packet
 const (
-	messageStart   = 0xcc
-	wifiMessage    = 26
-	videoRateQuery = 40
-	lightMessage   = 53
-	flightMessage  = 86
+	messageStart   = 0x00cc // 204
+	wifiMessage    = 0x001a // 26
+	videoRateQuery = 0x0028 // 40
+	lightMessage   = 0x0035 // 53
+	flightMessage  = 0x0056 // 86
+	logMessage     = 0x1050 // 4176
 
-	logMessage = 0x50
-
-	videoEncoderRateCommand = 0x20
-	videoStartCommand       = 0x25
-	exposureCommand         = 0x34
-	timeCommand             = 70
-	stickCommand            = 80
-	takeoffCommand          = 0x54
-	landCommand             = 0x55
-	flipCommand             = 0x5c
+	videoEncoderRateCommand = 0x0020 // 32
+	videoStartCommand       = 0x0025 // 37
+	exposureCommand         = 0x0034 // 52
+	timeCommand             = 0x0046 // 70
+	stickCommand            = 0x0050 // 80
+	takeoffCommand          = 0x0054 // 84
+	landCommand             = 0x0055 // 85
+	flipCommand             = 0x005c // 92
+	throwtakeoffCommand     = 0x005d // 93
+	palmLandCommand         = 0x005e // 94
+	bounceCommand           = 0x1053 // 4179
 )
 
 // FlipType is used for the various flips supported by the Tello.
@@ -123,61 +133,64 @@ const (
 
 // FlightData packet returned by the Tello
 type FlightData struct {
-	batteryLow               int16
-	batteryLower             int16
-	batteryPercentage        int8
-	batteryState             int16
-	cameraState              int8
-	downVisualState          int16
-	droneBatteryLeft         int16
-	droneFlyTimeLeft         int16
-	droneHover               int16
-	eMOpen                   int16
-	eMSky                    int16
-	eMGround                 int16
-	eastSpeed                int16
-	electricalMachineryState int16
-	factoryMode              int16
-	flyMode                  int8
-	flySpeed                 int16
-	flyTime                  int16
-	frontIn                  int16
-	frontLSC                 int16
-	frontOut                 int16
-	gravityState             int16
-	groundSpeed              int16
-	height                   int16
-	imuCalibrationState      int8
-	imuState                 int16
-	lightStrength            int16
-	northSpeed               int16
-	outageRecording          int16
-	powerState               int16
-	pressureState            int16
-	smartVideoExitMode       int16
-	temperatureHeight        int16
-	throwFlyTimer            int8
-	wifiDisturb              int16
-	wifiStrength             int16
-	windState                int16
+	BatteryLow               bool
+	BatteryLower             bool
+	BatteryPercentage        int8
+	BatteryState             bool
+	CameraState              int8
+	DownVisualState          bool
+	DroneBatteryLeft         int16
+	DroneFlyTimeLeft         int16
+	DroneHover               bool
+	EmOpen                   bool
+	EmSky                    bool
+	EmGround                 bool
+	EastSpeed                int16
+	ElectricalMachineryState int16
+	FactoryMode              bool
+	FlyMode                  int8
+	FlySpeed                 int16
+	FlyTime                  int16
+	FrontIn                  bool
+	FrontLSC                 bool
+	FrontOut                 bool
+	GravityState             bool
+	GroundSpeed              int16
+	Height                   int16
+	ImuCalibrationState      int8
+	ImuState                 bool
+	LightStrength            int8
+	NorthSpeed               int16
+	OutageRecording          bool
+	PowerState               bool
+	PressureState            bool
+	SmartVideoExitMode       int16
+	TemperatureHeight        bool
+	ThrowFlyTimer            int8
+	WifiDisturb              int8
+	WifiStrength             int8
+	WindState                bool
 }
 
 // WifiData packet returned by the Tello
 type WifiData struct {
-	Disturb  int16
-	Strength int16
+	Disturb  int8
+	Strength int8
 }
 
 // Driver represents the DJI Tello drone
 type Driver struct {
-	name                     string
-	reqAddr                  string
-	reqConn                  *net.UDPConn // UDP connection to send/receive drone commands
-	videoConn                *net.UDPConn // UDP connection for drone video
-	respPort                 string
-	cmdMutex                 sync.Mutex
-	seq                      int16
-	rx, ry, lx, ly, throttle float32
+	name           string
+	reqAddr        string
+	reqConn        *net.UDPConn // UDP connection to send/receive drone commands
+	videoConn      *net.UDPConn // UDP connection for drone video
+	respPort       string
+	videoPort      string
+	cmdMutex       sync.Mutex
+	seq            int16
+	rx, ry, lx, ly float32
+	throttle       int
+	bouncing       bool
 	gobot.Eventer
 }
 
@@ -185,15 +198,18 @@ type Driver struct {
 // from the drone.
 func NewDriver(port string) *Driver {
 	d := &Driver{name: gobot.DefaultName("Tello"),
-		reqAddr:  "192.168.10.1:8889",
-		respPort: port,
-		Eventer:  gobot.NewEventer(),
+		reqAddr:   "192.168.10.1:8889",
+		respPort:  port,
+		videoPort: "6038",
+		Eventer:   gobot.NewEventer(),
 	}
 
 	d.AddEvent(ConnectedEvent)
 	d.AddEvent(FlightDataEvent)
 	d.AddEvent(TakeoffEvent)
 	d.AddEvent(LandingEvent)
+	d.AddEvent(PalmLandingEvent)
+	d.AddEvent(BounceEvent)
 	d.AddEvent(FlipEvent)
 	d.AddEvent(TimeEvent)
 	d.AddEvent(LogEvent)
@@ -243,9 +259,8 @@ func (d *Driver) Start() error {
 		}
 	}()
 
-	// starts notifications coming from drone to port 6038 aka 0x9617 when encoded low-endian.
-	// TODO: allow setting a specific video port.
-	d.SendCommand("conn_req:\x96\x17")
+	// starts notifications coming from drone to video port normally 6038
+	d.SendCommand(d.connectionString())
 
 	// send stick commands
 	go func() {
@@ -279,9 +294,44 @@ func (d *Driver) TakeOff() (err error) {
 	return
 }
 
+// Throw & Go support
+func (d *Driver) ThrowTakeOff() (err error) {
+	buf, _ := d.createPacket(throwtakeoffCommand, 0x48, 0)
+	d.seq++
+	binary.Write(buf, binary.LittleEndian, d.seq)
+	binary.Write(buf, binary.LittleEndian, CalculateCRC16(buf.Bytes()))
+
+	_, err = d.reqConn.Write(buf.Bytes())
+	return
+}
+
 // Land tells drone to come in for landing.
 func (d *Driver) Land() (err error) {
 	buf, _ := d.createPacket(landCommand, 0x68, 1)
+	d.seq++
+	binary.Write(buf, binary.LittleEndian, d.seq)
+	binary.Write(buf, binary.LittleEndian, byte(0x00))
+	binary.Write(buf, binary.LittleEndian, CalculateCRC16(buf.Bytes()))
+
+	_, err = d.reqConn.Write(buf.Bytes())
+	return
+}
+
+// StopLanding tells drone to stop landing.
+func (d *Driver) StopLanding() (err error) {
+	buf, _ := d.createPacket(landCommand, 0x68, 1)
+	d.seq++
+	binary.Write(buf, binary.LittleEndian, d.seq)
+	binary.Write(buf, binary.LittleEndian, byte(0x01))
+	binary.Write(buf, binary.LittleEndian, CalculateCRC16(buf.Bytes()))
+
+	_, err = d.reqConn.Write(buf.Bytes())
+	return
+}
+
+// PalmLand tells drone to come in for a hand landing.
+func (d *Driver) PalmLand() (err error) {
+	buf, _ := d.createPacket(palmLandCommand, 0x68, 1)
 	d.seq++
 	binary.Write(buf, binary.LittleEndian, d.seq)
 	binary.Write(buf, binary.LittleEndian, byte(0x00))
@@ -327,6 +377,24 @@ func (d *Driver) SetVideoEncoderRate(rate VideoBitRate) (err error) {
 
 	_, err = d.reqConn.Write(buf.Bytes())
 	return
+}
+
+// SetFastMode sets the drone throttle to 1.
+func (d *Driver) SetFastMode() error {
+	d.cmdMutex.Lock()
+	defer d.cmdMutex.Unlock()
+
+	d.throttle = 1
+	return nil
+}
+
+// SetSlowMode sets the drone throttle to 0.
+func (d *Driver) SetSlowMode() error {
+	d.cmdMutex.Lock()
+	defer d.cmdMutex.Unlock()
+
+	d.throttle = 0
+	return nil
 }
 
 // Rate queries the current video bit rate.
@@ -413,6 +481,22 @@ func (d *Driver) CounterClockwise(val int) error {
 	return nil
 }
 
+// Bounce tells drone to start/stop performing the bouncing action
+func (d *Driver) Bounce() (err error) {
+	buf, _ := d.createPacket(bounceCommand, 0x68, 1)
+	d.seq++
+	binary.Write(buf, binary.LittleEndian, d.seq)
+	if d.bouncing {
+		binary.Write(buf, binary.LittleEndian, byte(0x31))
+	} else {
+		binary.Write(buf, binary.LittleEndian, byte(0x30))
+	}
+	binary.Write(buf, binary.LittleEndian, CalculateCRC16(buf.Bytes()))
+	_, err = d.reqConn.Write(buf.Bytes())
+	d.bouncing = !d.bouncing
+	return
+}
+
 // Flip tells drone to flip
 func (d *Driver) Flip(direction FlipType) (err error) {
 	buf, _ := d.createPacket(flipCommand, 0x70, 1)
@@ -457,50 +541,101 @@ func (d *Driver) ParseFlightData(b []byte) (fd *FlightData, err error) {
 		return
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &fd.height)
-	err = binary.Read(buf, binary.LittleEndian, &fd.northSpeed)
-	err = binary.Read(buf, binary.LittleEndian, &fd.eastSpeed)
-	err = binary.Read(buf, binary.LittleEndian, &fd.groundSpeed)
-	err = binary.Read(buf, binary.LittleEndian, &fd.flyTime)
+	err = binary.Read(buf, binary.LittleEndian, &fd.Height)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.NorthSpeed)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.EastSpeed)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.GroundSpeed)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.FlyTime)
+	if err != nil {
+		return
+	}
 
 	err = binary.Read(buf, binary.LittleEndian, &data)
-	fd.imuState = int16(data >> 0 & 0x1)
-	fd.pressureState = int16(data >> 1 & 0x1)
-	fd.downVisualState = int16(data >> 2 & 0x1)
-	fd.powerState = int16(data >> 3 & 0x1)
-	fd.batteryState = int16(data >> 4 & 0x1)
-	fd.gravityState = int16(data >> 5 & 0x1)
-	fd.windState = int16(data >> 7 & 0x1)
+	if err != nil {
+		return
+	}
+	fd.ImuState = (data >> 0 & 0x1) == 1
+	fd.PressureState = (data >> 1 & 0x1) == 1
+	fd.DownVisualState = (data >> 2 & 0x1) == 1
+	fd.PowerState = (data >> 3 & 0x1) == 1
+	fd.BatteryState = (data >> 4 & 0x1) == 1
+	fd.GravityState = (data >> 5 & 0x1) == 1
+	fd.WindState = (data >> 7 & 0x1) == 1
 
-	err = binary.Read(buf, binary.LittleEndian, &fd.imuCalibrationState)
-	err = binary.Read(buf, binary.LittleEndian, &fd.batteryPercentage)
-	err = binary.Read(buf, binary.LittleEndian, &fd.droneFlyTimeLeft)
-	err = binary.Read(buf, binary.LittleEndian, &fd.droneBatteryLeft)
-
-	err = binary.Read(buf, binary.LittleEndian, &data)
-	fd.eMSky = int16(data >> 0 & 0x1)
-	fd.eMGround = int16(data >> 1 & 0x1)
-	fd.eMOpen = int16(data >> 2 & 0x1)
-	fd.droneHover = int16(data >> 3 & 0x1)
-	fd.outageRecording = int16(data >> 4 & 0x1)
-	fd.batteryLow = int16(data >> 5 & 0x1)
-	fd.batteryLower = int16(data >> 6 & 0x1)
-	fd.factoryMode = int16(data >> 7 & 0x1)
-
-	err = binary.Read(buf, binary.LittleEndian, &fd.flyMode)
-	err = binary.Read(buf, binary.LittleEndian, &fd.throwFlyTimer)
-	err = binary.Read(buf, binary.LittleEndian, &fd.cameraState)
-
-	err = binary.Read(buf, binary.LittleEndian, &data)
-	fd.electricalMachineryState = int16(data & 0xff)
+	err = binary.Read(buf, binary.LittleEndian, &fd.ImuCalibrationState)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.BatteryPercentage)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.DroneFlyTimeLeft)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.DroneBatteryLeft)
+	if err != nil {
+		return
+	}
 
 	err = binary.Read(buf, binary.LittleEndian, &data)
-	fd.frontIn = int16(data >> 0 & 0x1)
-	fd.frontOut = int16(data >> 1 & 0x1)
-	fd.frontLSC = int16(data >> 2 & 0x1)
+	if err != nil {
+		return
+	}
+	fd.EmSky = (data >> 0 & 0x1) == 1
+	fd.EmGround = (data >> 1 & 0x1) == 1
+	fd.EmOpen = (data >> 2 & 0x1) == 1
+	fd.DroneHover = (data >> 3 & 0x1) == 1
+	fd.OutageRecording = (data >> 4 & 0x1) == 1
+	fd.BatteryLow = (data >> 5 & 0x1) == 1
+	fd.BatteryLower = (data >> 6 & 0x1) == 1
+	fd.FactoryMode = (data >> 7 & 0x1) == 1
+
+	err = binary.Read(buf, binary.LittleEndian, &fd.FlyMode)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.ThrowFlyTimer)
+	if err != nil {
+		return
+	}
+	err = binary.Read(buf, binary.LittleEndian, &fd.CameraState)
+	if err != nil {
+		return
+	}
 
 	err = binary.Read(buf, binary.LittleEndian, &data)
-	fd.temperatureHeight = int16(data >> 0 & 0x1)
+	if err != nil {
+		return
+	}
+	fd.ElectricalMachineryState = int16(data & 0xff)
+
+	err = binary.Read(buf, binary.LittleEndian, &data)
+	if err != nil {
+		return
+	}
+	fd.FrontIn = (data >> 0 & 0x1) == 1
+	fd.FrontOut = (data >> 1 & 0x1) == 1
+	fd.FrontLSC = (data >> 2 & 0x1) == 1
+
+	err = binary.Read(buf, binary.LittleEndian, &data)
+	if err != nil {
+		return
+	}
+	fd.TemperatureHeight = (data >> 0 & 0x1) == 1
 
 	return
 }
@@ -526,7 +661,7 @@ func (d *Driver) SendStickCommand() (err error) {
 	axis4 := int16(660.0*d.lx + 1024.0)
 
 	// speed control
-	axis5 := int16(660.0*d.throttle + 1024.0)
+	axis5 := int16(d.throttle)
 
 	packedAxis := int64(axis1)&0x7FF | int64(axis2&0x7FF)<<11 | 0x7FF&int64(axis3)<<22 | 0x7FF&int64(axis4)<<33 | int64(axis5)<<44
 	binary.Write(buf, binary.LittleEndian, byte(0xFF&packedAxis))
@@ -561,9 +696,9 @@ func (d *Driver) SendDateTime() (err error) {
 
 	now := time.Now()
 	binary.Write(buf, binary.LittleEndian, byte(0x00))
-	binary.Write(buf, binary.LittleEndian, now.Hour())
-	binary.Write(buf, binary.LittleEndian, now.Minute())
-	binary.Write(buf, binary.LittleEndian, now.Second())
+	binary.Write(buf, binary.LittleEndian, int16(now.Hour()))
+	binary.Write(buf, binary.LittleEndian, int16(now.Minute()))
+	binary.Write(buf, binary.LittleEndian, int16(now.Second()))
 	binary.Write(buf, binary.LittleEndian, int16(now.UnixNano()/int64(time.Millisecond)&0xff))
 	binary.Write(buf, binary.LittleEndian, int16(now.UnixNano()/int64(time.Millisecond)>>8))
 
@@ -581,6 +716,7 @@ func (d *Driver) SendCommand(cmd string) (err error) {
 
 func (d *Driver) handleResponse() error {
 	var buf [2048]byte
+	var msgType uint16
 	n, err := d.reqConn.Read(buf[0:])
 	if err != nil {
 		return err
@@ -588,36 +724,31 @@ func (d *Driver) handleResponse() error {
 
 	// parse binary packet
 	if buf[0] == messageStart {
-		if buf[6] == 0x10 {
-			switch buf[5] {
-			case logMessage:
-				d.Publish(d.Event(LogEvent), buf[9:])
-			default:
-				fmt.Printf("Unknown message: %+v\n", buf[0:n])
-			}
-			return nil
-		}
-
-		switch buf[5] {
+		msgType = (uint16(buf[6]) << 8) | uint16(buf[5])
+		switch msgType {
 		case wifiMessage:
-			buf := bytes.NewReader(buf[9:12])
+			buf := bytes.NewReader(buf[9:10])
 			wd := &WifiData{}
-
-			err = binary.Read(buf, binary.LittleEndian, &wd.Disturb)
-			err = binary.Read(buf, binary.LittleEndian, &wd.Strength)
+			binary.Read(buf, binary.LittleEndian, &wd.Strength)
+			binary.Read(buf, binary.LittleEndian, &wd.Disturb)
 			d.Publish(d.Event(WifiDataEvent), wd)
 		case lightMessage:
-			buf := bytes.NewReader(buf[9:10])
-			var ld int16
-
-			err = binary.Read(buf, binary.LittleEndian, &ld)
+			buf := bytes.NewReader(buf[9:9])
+			var ld int8
+			binary.Read(buf, binary.LittleEndian, &ld)
 			d.Publish(d.Event(LightStrengthEvent), ld)
+		case logMessage:
+			d.Publish(d.Event(LogEvent), buf[9:])
 		case timeCommand:
 			d.Publish(d.Event(TimeEvent), buf[7:8])
+		case bounceCommand:
+			d.Publish(d.Event(BounceEvent), buf[7:8])
 		case takeoffCommand:
 			d.Publish(d.Event(TakeoffEvent), buf[7:8])
 		case landCommand:
 			d.Publish(d.Event(LandingEvent), buf[7:8])
+		case palmLandCommand:
+			d.Publish(d.Event(PalmLandingEvent), buf[7:8])
 		case flipCommand:
 			d.Publish(d.Event(FlipEvent), buf[7:8])
 		case flightMessage:
@@ -681,13 +812,10 @@ func (d *Driver) createPacket(cmd int16, pktType byte, len int16) (buf *bytes.Bu
 	return buf, nil
 }
 
-func validatePitch(val int) int {
-	if val > 100 {
-		return 100
-	}
-	if val < 0 {
-		return 0
-	}
-
-	return val
+func (d *Driver) connectionString() string {
+	x, _ := strconv.Atoi(d.videoPort)
+	b := [2]byte{}
+	binary.LittleEndian.PutUint16(b[:], uint16(x))
+	res := fmt.Sprintf("conn_req:%s", b)
+	return res
 }

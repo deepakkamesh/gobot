@@ -21,7 +21,7 @@ func initTestDriver() *Driver {
 	a.Connect()
 	d := NewDriver(a, "./configs/xbox360_power_a_mini_proex.json")
 	d.poll = func() sdl.Event {
-		return new(interface{})
+		return nil
 	}
 	return d
 }
@@ -100,7 +100,7 @@ func TestDriverHandleEvent(t *testing.T) {
 	}
 
 	// down button press
-	d.On(d.Event("down"), func(data interface{}) {
+	d.On(d.Event("down_press"), func(data interface{}) {
 		sem <- true
 	})
 	d.handleEvent(&sdl.JoyHatEvent{

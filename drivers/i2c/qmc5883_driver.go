@@ -1,9 +1,6 @@
 package i2c
 
 import (
-	"math"
-	"time"
-
 	"gobot.io/x/gobot"
 )
 
@@ -39,8 +36,8 @@ const (
 	QMC5883OSR128 = 0x80 // Over sample rate 128.
 	QMC5883OSR64  = 0xC0 // Over sample rate 64.
 
-	qmc5883SScale2G = 1.22 // Scale for 2G.
-	qmc5883SScale8G = 4.35 // Scale for 8G.
+	QMC5883SScale2G = 1.22 // Scale for 2G.
+	QMC5883SScale8G = 4.35 // Scale for 8G.
 
 	QMC5883DefaultConfig = QMC5883Continuous | QMC5883ODR100Hz | QMC5883RNG8G | QMC5883OSR512
 )
@@ -51,10 +48,7 @@ type QMC5883Driver struct {
 	connector  Connector
 	connection Connection
 	Config
-	xOff      int16 // x Offset.
-	yOff      int16 // y Offset.
-	zOff      int16 // z Offset.
-	magConfig byte  // Config byte.
+	magConfig byte // Config byte.
 }
 
 // NewQMC588Driver creates a new driver with specified i2c interface
@@ -114,61 +108,11 @@ func (h *QMC5883Driver) Start() (err error) {
 	return
 }
 
+func (h *QMC5883Driver) GetConfig() (config byte) {
+	return h.magConfig
+}
 func (h *QMC5883Driver) SetConfig(config byte) {
 	h.magConfig = config
-}
-
-// Calculate offset.
-func (h *QMC5883Driver) CalibrateCompass(ch chan struct{}) (offsetX, offsetY int16) {
-
-	var minX, maxX, minY, maxY int16
-
-	getReading := func() (err error) {
-		x, y, _, err := h.RawHeading()
-		if err != nil {
-			return
-		}
-
-		if x < minX {
-			minX = x
-		}
-		if x > maxX {
-			maxX = x
-		}
-		if y < minY {
-			minY = y
-		}
-		if y > maxY {
-			maxY = y
-		}
-		return nil
-	}
-
-	for {
-		select {
-		// 360" rotation complete; return offsets.
-		case <-ch:
-			offsetX = (minX + maxX) / 2
-			offsetY = (minY + maxY) / 2
-			//	offsetX = totX / cnt
-			//	offsetY = totY / cnt
-			return
-
-		default:
-			if err := getReading(); err != nil {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
-// SetOffsets sets the offsets.
-func (h *QMC5883Driver) SetOffset(xOff, yOff, zOff int16) {
-	h.xOff = xOff
-	h.yOff = yOff
-	h.zOff = zOff
-
 }
 
 // Halt returns true if devices is halted successfully
@@ -193,40 +137,7 @@ func (h *QMC5883Driver) GetStatusReg() (byte, error) {
 	return data[0], nil
 }
 
-// Heading returns the current heading
-func (h *QMC5883Driver) Heading() (headingDeg float64, err error) {
-	x, y, z, err := h.RawHeading()
-	if err != nil {
-		return
-	}
-
-	return h.HeadingFromRaw(x, y, z), nil
-}
-
-// Heading returns the current heading
-func (h *QMC5883Driver) HeadingFromRaw(x, y, z int16) (headingDeg float64) {
-
-	scale := qmc5883SScale2G
-	if (h.magConfig & 0xF0) == QMC5883RNG8G {
-		scale = qmc5883SScale8G
-	}
-
-	heading := math.Atan2(float64(y)*scale, float64(x)*scale)
-	declinationAngle := (13.0 + (17.0 / 60.0)) / (180 / math.Pi) // Specifc to each location.
-	heading += declinationAngle
-	// correct for negative degress.
-	if heading < 0 {
-		heading += 2 * math.Pi
-	}
-	if heading > 2*math.Pi {
-		heading -= 2 * math.Pi
-	}
-
-	headingDeg = heading * 180 / math.Pi
-	return
-}
-
-// read returns raw compass values.
+// RawHeading returns the X,Y,Z readings from the compass.
 func (h *QMC5883Driver) RawHeading() (x, y, z int16, err error) {
 	var st byte
 	for {
@@ -256,10 +167,6 @@ func (h *QMC5883Driver) RawHeading() (x, y, z int16, err error) {
 	x = int16(data[1])<<8 | int16(data[0])
 	y = int16(data[3])<<8 | int16(data[2])
 	z = int16(data[5])<<8 | int16(data[4])
-
-	x -= h.xOff
-	y -= h.yOff
-	z -= h.zOff
 
 	return
 }
